@@ -10,15 +10,24 @@ class LyricsTests(unittest.TestCase):
         self.assertIsNone(line_at(rows, 0))
         self.assertEqual(line_at(rows, 1.5), 'One')
         self.assertEqual(line_at(rows, 3.25), 'Two')
-        self.assertIsNone(line_at(rows, 6))
+        self.assertEqual(line_at(rows, 6), 'Two')
         self.assertEqual(line_at(rows, 8), 'Three')
         self.assertEqual(line_at(rows, 2), 'One')
 
     def test_qrc_words_and_gap(self):
         rows = parse('<Lyric_1 LyricContent="[1000,500]你(1000,200)好(1200,300)&#10;[3000,1000]世界(3000,1000)"/>')
         self.assertEqual(line_at(rows, 1.1), '你好')
-        self.assertIsNone(line_at(rows, 2))
+        self.assertEqual(line_at(rows, 2), '你好')
         self.assertEqual(line_at(rows, 3.1), '世界')
+
+    def test_qrc_literal_quotes_do_not_truncate_song(self):
+        rows = parse('<Lyric_1 LyricType="1" LyricContent="[1000,500]First\n[50000,1000]"Quoted"(50000,1000)\n[180000,2000]Last"/>')
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(line_at(rows, 51), '"Quoted"')
+        self.assertEqual(line_at(rows, 181), 'Last')
+        self.assertEqual(line_at(rows, 190), 'Last')
+        self.assertEqual(line_at(rows, 2), 'First')
+        self.assertIsNone(line_at(rows, 0))
 
     def test_offset(self):
         self.assertEqual(line_at(parse('[offset:500]\n[00:01]Earlier'), .5), 'Earlier')

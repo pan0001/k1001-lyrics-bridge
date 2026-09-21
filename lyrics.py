@@ -52,7 +52,9 @@ def decode_local(path):
 
 def parse(text, offset=0):
     # Attribute newlines must be preserved: XML parsers normalize them to spaces.
-    content = re.search(r'LyricContent\s*=\s*"(.*?)"', text, re.S)
+    # QQ cache can contain literal, unescaped quotes inside the attribute.
+    # Only the quote immediately before the element terminator ends its payload.
+    content = re.search(r'LyricContent\s*=\s*"(.*?)"\s*/>', text, re.S)
     if content:
         text = html.unescape(content.group(1))
     match = re.search(r'\[offset:([+-]?\d+)\]', text, re.I)
@@ -85,12 +87,13 @@ def parse(text, offset=0):
 
 def line_at(rows, seconds):
     index = bisect_right([row.start for row in rows], seconds) - 1
-    if index < 0:
-        return None
-    row = rows[index]
-    if seconds >= row.end or not row.text:
-        return None
-    return row.text
+    # Hold the last nonempty line through gaps and instrumental breaks.
+    # Recompute from position so seeking backwards and song changes stay correct.
+    while index >= 0:
+        if rows[index].text:
+            return rows[index].text
+        index -= 1
+    return None
 
 
 class LocalLyrics:
