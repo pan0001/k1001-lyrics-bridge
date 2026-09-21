@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta, timezone
@@ -48,6 +49,7 @@ class Bridge:
         self.source_id = ''
         self.last_metadata = None
         self.last_choices = None
+        self.last_session_reclaim = 0.0
         self.closing = False
         self.loop = None
         self.smtc = None
@@ -175,6 +177,17 @@ class Bridge:
         self.smtc.is_stop_enabled = controls.is_stop_enabled
         timeline = s.get_timeline_properties()
         playing = int(info.playback_status) == 4
+        # Resuming the player can make Windows route AVRCP directly to it.
+        # Re-register our session only when that source displaced us, with a
+        # cooldown. Do not compete with unrelated media apps selected by users.
+        if playing and current_id == self.source_id and time.monotonic() - self.last_session_reclaim >= 2:
+            self.smtc.is_enabled = False
+            self.smtc.playback_status = MediaPlaybackStatus.STOPPED
+            self.last_metadata = None
+            self.last_session_reclaim = time.monotonic()
+            logging.info('Reclaiming media output after source became current')
+            # Let Windows observe the inactive session before re-enabling it.
+            await asyncio.sleep(0.15)
         output_title = p.title
         lyric_status = ''
         if self.lyrics_enabled and self.source_id.lower() == 'qqmusic.exe':

@@ -14,7 +14,7 @@
 
 ## 下载与使用
 
-1. 在本仓库的 **Releases** 下载 `K1001-Lyrics-Bridge-v1.0.1-windows-x64.zip`，完整解压到固定位置。
+1. 在本仓库的 **Releases** 下载 `K1001-Lyrics-Bridge-v1.0.2-windows-x64.zip`，完整解压到固定位置。
 2. 在 Windows 蓝牙设置中连接 K1001；如果设备连接着手机，先断开手机。
 3. 双击 `K1001-Bridge/K1001-Bridge.exe`。无需安装 Python 或使用管理员权限。
 4. 使用 QQ 音乐播放歌曲。程序默认启用歌词模式，自动跟随播放进度。
