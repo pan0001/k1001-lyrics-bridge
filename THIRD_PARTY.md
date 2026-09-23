@@ -19,6 +19,7 @@ functools.lru_cache in place of LDDC's application-level caching dependency.
 - Python: PSF license, https://www.python.org/psf/license/
 - PyWinRT: MIT, https://github.com/pywinrt/pywinrt
 - pystray: LGPL-3.0, https://github.com/moses-palmer/pystray
+- psutil: BSD-3-Clause, https://github.com/giampaolo/psutil
 - Pillow: HPND, https://github.com/python-pillow/Pillow
 - PyInstaller bootloader: GPL with bootloader exception, https://pyinstaller.org/en/stable/license.html
 

@@ -10,3 +10,4 @@ winrt-Windows.Storage.Streams==3.2.1
 pyinstaller==6.22.3
 pystray==0.19.5
 pillow==12.3.0
+psutil==7.2.2

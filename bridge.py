@@ -1,4 +1,4 @@
-"""K1001 media metadata bridge. Windows 10 1809+ / Windows 11."""
+"""SkyLyrics media metadata bridge. Windows 10 1809+ / Windows 11."""
 import asyncio
 import ctypes
 import json
@@ -14,6 +14,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta, timezone
 from lyrics import LocalLyrics
+from idle_display import IdleClock, settings_from, display_pages
+from system_stats import SystemStats
 
 from winrt.windows.media import (
     MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControlsButton,
@@ -55,6 +57,11 @@ class Bridge:
         self.smtc = None
         self.lyrics = LocalLyrics()
         self.lyrics_enabled = True
+        self.settings = settings_from({})
+        self.idle_clock = IdleClock()
+        self.idle_started = None
+        self.preview_until = 0
+        self.stats = SystemStats()
 
     def emit(self, kind, value):
         self.events.put((kind, value))
@@ -121,6 +128,7 @@ class Bridge:
             updater.music_properties.album_title = album
             updater.update()
             self.last_metadata = metadata
+            self.emit('output', title)
             logging.info('Published metadata update from %s', self.source_id or 'manual')
         c.playback_status = MediaPlaybackStatus.PLAYING if playing else MediaPlaybackStatus.PAUSED
         props = SystemMediaTransportControlsTimelineProperties()
@@ -135,6 +143,19 @@ class Bridge:
         c.update_timeline_properties(props)
         return props.position, props.end_time
 
+    async def show_idle(self, now):
+        self.stats.set_active('idle', True)
+        if self.idle_started is None:
+            self.idle_started = now
+            self.smtc.is_enabled = False
+            self.smtc.playback_status = MediaPlaybackStatus.STOPPED
+            self.last_metadata = None
+            await asyncio.sleep(0.15)
+        pages = display_pages(self.settings, self.stats.snapshot())
+        index = int((now - self.idle_started) / self.settings['rotation_seconds']) % len(pages)
+        self.publish(pages[index], '晴空歌词 · 待机显示', playing=False)
+        self.emit('status', '正在预览待机显示' if now < self.preview_until else '待机显示 · 恢复播放后自动显示歌词')
+
     async def poll(self):
         sessions = [s for s in self.manager.get_sessions() if s.source_app_user_model_id != APP_ID]
         choices = sorted(set(s.source_app_user_model_id for s in sessions))
@@ -142,7 +163,9 @@ class Bridge:
             self.last_choices = choices
             self.emit('choices', choices)
         if self.mode != 'auto':
+            self.stats.set_active('idle', False)
             return
+        now = time.monotonic()
         # Snapshot once. An app may close while being queried; skip only that app.
         candidates = []
         for s in sessions:
@@ -156,7 +179,18 @@ class Bridge:
             except Exception as exc:
                 logging.debug('Source unavailable: %s', exc)
         if not candidates:
+            self.source = None
+            self.source_id = ''
+            other_playing = any(int(s.get_playback_info().playback_status) == 4 for s in sessions)
+            active = self.idle_clock.active(other_playing, now, self.settings['idle_enabled'], self.settings['idle_minutes'])
+            self.update_sampling(now, other_playing)
+            if not other_playing and (active or now < self.preview_until):
+                self.smtc.is_next_enabled = self.smtc.is_previous_enabled = self.smtc.is_stop_enabled = False
+                await self.show_idle(now)
+                return
+            self.idle_started = None
             self.disable()
+            self.emit('output', '等待音乐播放')
             self.emit('track', ('等待播放器提供歌曲信息', '', ''))
             self.emit('status', '等待所选播放器…' if self.selected else '等待音乐播放…')
             return
@@ -177,6 +211,17 @@ class Bridge:
         self.smtc.is_stop_enabled = controls.is_stop_enabled
         timeline = s.get_timeline_properties()
         playing = int(info.playback_status) == 4
+        other_playing = any(s.source_app_user_model_id != self.source_id and
+                            int(s.get_playback_info().playback_status) == 4 for s in sessions)
+        active = self.idle_clock.active(playing or other_playing, now,
+                                       self.settings['idle_enabled'], self.settings['idle_minutes'])
+        self.update_sampling(now, playing or other_playing)
+        if not other_playing and (active or now < self.preview_until):
+            await self.show_idle(now)
+            return
+        if self.idle_started is not None:
+            self.last_metadata = None
+            self.idle_started = None
         # Resuming the player can make Windows route AVRCP directly to it.
         # Re-register our session only when that source displaced us, with a
         # cooldown. Do not compete with unrelated media apps selected by users.
@@ -200,6 +245,11 @@ class Bridge:
         self.emit('track', (p.title, p.artist, f'{self.source_id}  ·  {format_time(position)} / {format_time(duration)}'))
         self.emit('status', ('正在转发 · 播放中' if playing else '正在转发 · 播放器已暂停') + lyric_status)
 
+    def update_sampling(self, now, playing):
+        almost_idle = (not playing and self.settings['idle_enabled'] and self.idle_clock.since is not None
+                       and now-self.idle_clock.since >= max(0, self.settings['idle_minutes']*60-10))
+        self.stats.set_active('idle', almost_idle or now < self.preview_until)
+
     async def main(self):
         self.loop = asyncio.get_running_loop()
         self.manager = await Manager.request_async()
@@ -208,6 +258,7 @@ class Bridge:
         self.smtc = player.system_media_transport_controls
         token = self.smtc.add_button_pressed(self.on_button)
         self.smtc.is_enabled = False
+        self.stats.start()
         self.emit('ready', None)
         try:
             while not self.closing:
@@ -221,11 +272,16 @@ class Bridge:
                             self.selected = value or ''
                             self.mode = 'auto'
                             self.last_metadata = None
+                            self.idle_clock.since = None
+                            self.idle_started = None
+                            self.preview_until = 0
                         elif action == 'stop':
                             self.mode = 'stopped'
                             self.disable()
                             self.emit('status', '已停止转发')
                             self.emit('track', ('转发已停止', '', ''))
+                            self.emit('output', '转发已停止')
+                            self.preview_until = 0
                         elif action == 'test':
                             self.mode = 'test'
                             self.source = None
@@ -239,6 +295,15 @@ class Bridge:
                             await self.handle_button(value)
                         elif action == 'lyrics':
                             self.lyrics_enabled = bool(value)
+                        elif action == 'settings':
+                            self.settings = settings_from(value)
+                            self.selected = self.settings['source']
+                            self.lyrics_enabled = self.settings['lyrics']
+                            self.idle_started = None
+                        elif action == 'preview_idle':
+                            self.mode = 'auto'
+                            self.preview_until = time.monotonic() + 15
+                            self.idle_started = None
                     if self.closing:
                         break
                     await self.poll()
@@ -248,6 +313,7 @@ class Bridge:
                     self.emit('status', '读取暂时失败，正在重试…')
                 await asyncio.sleep(0.2)
         finally:
+            self.stats.close()
             self.disable()
             self.smtc.remove_button_pressed(token)
             player.close()
@@ -262,7 +328,7 @@ def format_time(value):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('K1001 歌曲信息转发器')
+        root.title('晴空歌词 · SkyLyrics')
         root.geometry('650x430')
         root.minsize(590, 400)
         root.configure(bg='#f3f5f7')
@@ -274,7 +340,7 @@ class App:
         style.configure('TButton', padding=(12, 8))
         frame = ttk.Frame(root, padding=24)
         frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='K1001 歌曲信息转发器', font=('Microsoft YaHei UI', 19, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='晴空歌词 · SkyLyrics', font=('Microsoft YaHei UI', 19, 'bold')).pack(anchor='w')
         ttk.Label(frame, text='通过 Windows 媒体通道转发歌名、歌手和播放进度。').pack(anchor='w', pady=(6, 20))
         row = ttk.Frame(frame)
         row.pack(fill='x')
@@ -299,7 +365,7 @@ class App:
         ttk.Label(frame, textvariable=self.status, foreground='#246b55', wraplength=570).pack(anchor='w', pady=(16, 8))
         footer = ttk.Frame(frame)
         footer.pack(side='bottom', fill='x')
-        ttk.Label(footer, text='保持 K1001 蓝牙连接；关闭窗口即退出。', foreground='#657080').pack(side='left')
+        ttk.Label(footer, text='保持歌词显示器蓝牙连接；关闭窗口即退出。', foreground='#657080').pack(side='left')
         ttk.Button(footer, text='诊断信息', command=self.diagnostics).pack(side='right')
         self.events = queue.Queue()
         self.bridge = Bridge(self.events)
@@ -393,7 +459,7 @@ def main():
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
-        ctypes.windll.user32.MessageBoxW(None, '转发器已经在运行，请查看任务栏中的窗口。', 'K1001 转发器', 0)
+        ctypes.windll.user32.MessageBoxW(None, '转发器已经在运行，请查看任务栏中的窗口。', '晴空歌词', 0)
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, handlers=[RotatingFileHandler(
