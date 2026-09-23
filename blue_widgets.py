@@ -11,12 +11,21 @@ YELLOW = '#ffe27a'
 FONT = 'Microsoft YaHei UI'
 
 
+def unchanged_size(widget, event):
+    """Configure also fires on moves: scrolling must not rebuild every canvas."""
+    size = (widget.winfo_width(), widget.winfo_height())
+    previous = getattr(widget, '_paint_size', None)
+    widget._paint_size = size
+    return event is not None and size == previous
+
+
 class Pattern(tk.Canvas):
     def __init__(self, parent):
         super().__init__(parent, bg=BG, highlightthickness=0)
         self.bind('<Configure>', self.paint)
 
     def paint(self, event=None):
+        if unchanged_size(self, event): return
         self.delete('all')
         w, h = self.winfo_width(), self.winfo_height()
         for x in range(-120, w+160, 240):
@@ -49,10 +58,12 @@ class CutButton(tk.Canvas):
         self.command()
 
     def state(self, hover):
+        if self.hover == hover: return
         self.hover = hover
         self.paint()
 
     def paint(self, event=None):
+        if unchanged_size(self, event): return
         self.delete('all')
         w, h = self.winfo_width(), self.winfo_height()-4
         fill = BLUE if self.primary else ('#e7f6ff' if self.hover else 'white')
@@ -74,6 +85,7 @@ class Toggle(tk.Canvas):
         self.bind('<Configure>', self.paint)
 
     def paint(self, event=None):
+        if unchanged_size(self, event): return
         self.delete('all')
         on = self.variable.get()
         color = BLUE if on else '#cad8e3'
@@ -92,6 +104,7 @@ class MetricChip(tk.Canvas):
         self.bind('<space>', lambda e: variable.set(not variable.get()))
 
     def paint(self, event=None):
+        if unchanged_size(self, event): return
         self.delete('all')
         w = self.winfo_width()
         on = self.variable.get()
@@ -109,10 +122,12 @@ class StatCard(tk.Canvas):
         self.bind('<Configure>', self.paint)
 
     def set(self, value):
+        if self.value == value: return
         self.value = value
         self.paint()
 
     def paint(self, event=None):
+        if unchanged_size(self, event): return
         self.delete('all')
         w = self.winfo_width()
         self.create_polygon(w-44, 0, w, 0, w, 44, fill='#edf8ff', outline='')
@@ -134,6 +149,7 @@ class Screen(tk.Canvas):
         self.bind('<Map>', self.paint)
 
     def paint(self, event=None):
+        if unchanged_size(self, event): return
         if not self.winfo_ismapped():
             return
         self.delete('all')

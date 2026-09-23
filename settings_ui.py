@@ -6,7 +6,7 @@ from PIL import Image, ImageTk
 from window_chrome import TitleBar, SlimScroll
 from idle_display import METRICS, validate_template
 from blue_widgets import BLUE, CYAN, NAVY, MUTED, BG, LINE, YELLOW, FONT
-from blue_widgets import Pattern, CutButton, Toggle, MetricChip, StatCard, Screen
+from blue_widgets import Pattern, CutButton, Toggle, MetricChip, StatCard, Screen, unchanged_size
 
 
 class SettingsWindow:
@@ -48,6 +48,7 @@ class SettingsWindow:
         header = tk.Canvas(shell, height=70, bg=BG, highlightthickness=0)
         header.pack(fill='x', pady=(0, 18))
         def draw_header(event=None):
+            if unchanged_size(header, event): return
             header.delete('all')
             w=header.winfo_width()
             header.create_image(27, 31, image=self.brand_image)
@@ -55,7 +56,7 @@ class SettingsWindow:
             header.create_text(228, 24, text='SKYLYRICS', anchor='w', fill=NAVY, font=('Segoe UI',17,'bold','italic'))
             header.create_text(67, 50, text='让每一段日常，都有自己的旋律。', anchor='w', fill=MUTED, font=(FONT,9))
             header.create_text(w-7, 20, text='DESKTOP  /  CONTROL PANEL', anchor='e', fill=MUTED, font=('Segoe UI',9))
-            header.create_text(w-7, 44, text='本地运行  ·  v1.1.0', anchor='e', fill=BLUE, font=(FONT,9))
+            header.create_text(w-7, 44, text='本地运行  ·  v1.1.1', anchor='e', fill=BLUE, font=(FONT,9))
             header.create_line(0, 69, w, 69, fill=LINE)
         header.bind('<Configure>', draw_header)
         body = tk.Frame(shell, bg=BG)
@@ -273,7 +274,7 @@ class SettingsWindow:
         self.sensor_note.set('CPU 温度未接入传感器，可在「常规设置」查看说明。' if snapshot.get('cpu_temp') is None else
                              '本机传感器数据已更新。')
 
-    def save(self):
+    def save(self, preview=False):
         try:
             minutes, rotation = float(self.minutes.get()), float(self.rotation.get())
             if not .1 <= minutes <= 120 or not 2 <= rotation <= 60:
@@ -286,15 +287,11 @@ class SettingsWindow:
             settings = dict(source='' if self.source.get() == '自动选择' else self.source.get(),
                             lyrics=self.lyrics.get(), idle_enabled=self.enabled.get(), idle_minutes=minutes,
                             rotation_seconds=rotation, idle_mode=self.mode.get(), metrics=metrics, custom_text=text)
-            self.app.apply_settings(settings, self.startup.get())
+            return self.app.apply_settings(settings, self.startup.get(), preview=preview)
         except Exception as exc:
             self.message.set(str(exc) if isinstance(exc, ValueError) else '保存失败，请检查程序日志后重试。')
             return False
-        self.message.set('已保存 · 设置即时生效，关闭窗口后继续在后台运行。')
-        return True
 
     def preview(self):
-        if self.save():
-            self.app.bridge.submit('preview_idle')
-            self.message.set('正在向歌词屏预览待机内容，15 秒后恢复自动模式。')
+        self.save(preview=True)
 

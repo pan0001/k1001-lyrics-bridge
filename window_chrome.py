@@ -16,8 +16,9 @@ class TitleBar(tk.Frame):
         self.user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
         self.user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
         self.user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
-        self.user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-        self.user32.SendMessageW.restype = wintypes.LPARAM
+        self.user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        self.user32.PostMessageW.restype = wintypes.BOOL
+        self.last_state = None
         self.logo = tk.Label(self, image=image, bg=BG)
         self.logo.pack(side='left', padx=(18, 6))
         label = tk.Label(self, text='晴空歌词  /  SKYLYRICS', bg=BG, fg=NAVY, font=(FONT, 9))
@@ -60,14 +61,20 @@ class TitleBar(tk.Frame):
 
     def on_state(self, event):
         if event.widget is self.root:
-            self.max_button.configure(text='❐' if self.root.state() == 'zoomed' else '□')
+            state = self.root.state()
+            if state != self.last_state:
+                self.last_state = state
+                self.max_button.configure(text='❐' if state == 'zoomed' else '□')
 
     def maximize(self):
         self.root.state('normal' if self.root.state() == 'zoomed' else 'zoomed')
 
     def drag(self, event):
         self.user32.ReleaseCapture()
-        self.user32.SendMessageW(self.hwnd(), 0x00A1, 2, 0)
+        # Never enter a native modal move loop from a Python/Tk callback.
+        # Tk must dispatch this message from its own event loop, with its
+        # interpreter thread state restored (otherwise PyEval_RestoreThread aborts).
+        self.user32.PostMessageW(self.hwnd(), 0x00A1, 2, 0)
 
 
 class SlimScroll(tk.Canvas):

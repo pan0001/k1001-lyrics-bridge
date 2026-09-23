@@ -1,5 +1,6 @@
 """Silent, single-process tray entry point for SkyLyrics."""
 import ctypes
+import faulthandler
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -8,6 +9,7 @@ import queue
 import sys
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import winreg
 from pathlib import Path
 
@@ -91,7 +93,11 @@ class TrayApp:
         from idle_display import settings_from
         self.root = tk.Tk()
         self.root.withdraw()
+        self.root.report_callback_exception = lambda kind, value, tb: logging.error(
+            'UI callback failed', exc_info=(kind, value, tb))
         self.events = queue.Queue()
+        self.settings_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='SettingsIO')
+        self.saving = False
         self.bridge = Bridge(self.events)
         self.quit_event = threading.Event()
         self.config = DATA_DIR / 'settings.json'
@@ -126,22 +132,38 @@ class TrayApp:
             pystray.MenuItem('退出', lambda: self.post('exit')),
         )
 
-    def apply_settings(self, settings, startup):
+    def apply_settings(self, settings, startup, preview=False):
         from idle_display import settings_from
+        if self.saving:
+            self.ui.message.set('设置正在保存，请稍候。')
+            return False
         new = settings_from(settings)
-        if startup != startup_enabled():
-            set_startup(startup)
-        # Repair the target when the app folder has moved.
-        elif startup:
-            set_startup(True)
-        temp = self.config.with_suffix('.tmp')
-        temp.write_text(json.dumps(new, ensure_ascii=False, indent=2), encoding='utf-8')
-        temp.replace(self.config)
-        self.settings = new
-        self.selected = new['source']
-        self.lyrics_enabled = new['lyrics']
-        self.bridge.submit('settings', new)
-        self.icon.update_menu()
+        self.saving = True
+        self.ui.message.set('正在保存设置…')
+        def write():
+            try:
+                # Startup target repair already runs once at application launch.
+                if startup != startup_enabled():
+                    set_startup(startup)
+                temp = self.config.with_suffix('.tmp')
+                temp.write_text(json.dumps(new, ensure_ascii=False, indent=2), encoding='utf-8')
+                temp.replace(self.config)
+                self.events.put(('settings_saved', (new, preview)))
+            except Exception:
+                logging.exception('Could not save settings')
+                self.events.put(('settings_failed', None))
+        self.settings_worker.submit(write)
+        return True
+
+    def toggle_startup(self):
+        def write():
+            try:
+                set_startup(not startup_enabled())
+                self.events.put(('startup_saved', None))
+            except Exception:
+                logging.exception('Could not change startup')
+                self.events.put(('settings_failed', None))
+        self.settings_worker.submit(write)
 
     def show(self):
         self.bridge.stats.set_active('panel', True)
@@ -161,6 +183,7 @@ class TrayApp:
         self.root.withdraw()
         self.bridge.submit('close')
         self.icon.stop()
+        self.settings_worker.shutdown(wait=False)
         self.root.after(100, self.finish_exit)
 
     def finish_exit(self):
@@ -187,13 +210,25 @@ class TrayApp:
                     self.exit()
                     return
                 elif value == 'startup':
-                    try:
-                        set_startup(not startup_enabled())
-                        self.ui.refresh_startup()
-                        self.icon.update_menu()
-                    except (OSError, subprocess.SubprocessError):
-                        logging.exception('Could not change startup')
-                        self.ui.message.set('自启动设置失败，请稍后重试。')
+                    self.toggle_startup()
+            elif kind == 'settings_saved':
+                self.saving = False
+                new, preview = value
+                self.settings = new
+                self.selected = new['source']
+                self.lyrics_enabled = new['lyrics']
+                self.bridge.submit('settings', new)
+                if preview:
+                    self.bridge.submit('preview_idle')
+                self.ui.message.set('正在预览待机内容，15 秒后恢复自动模式。' if preview else '已保存 · 设置即时生效。')
+                self.ui.refresh_startup()
+                self.icon.update_menu()
+            elif kind == 'startup_saved':
+                self.ui.refresh_startup()
+                self.icon.update_menu()
+            elif kind == 'settings_failed':
+                self.saving = False
+                self.ui.message.set('保存失败，请检查程序日志后重试。')
             elif kind == 'ready':
                 self.bridge.submit('settings', self.settings)
                 self.bridge.submit('auto', self.selected)
@@ -201,12 +236,16 @@ class TrayApp:
                 self.choices = value
                 self.ui.update_sources(value)
             elif kind in ('status', 'error'):
-                self.status = value
-                self.icon.title = ('晴空歌词 · ' + value)[:127]
-                self.ui.status.set(value)
+                if self.status != value:
+                    self.status = value
+                    self.icon.title = ('晴空歌词 · ' + value)[:127]
+                    self.ui.status.set(value)
             elif kind == 'track':
-                self.ui.track.set(value[0])
-                self.ui.detail.set(value[1] + '  ' + value[2])
+                if self.ui.track.get() != value[0]:
+                    self.ui.track.set(value[0])
+                detail = value[1] + '  ' + value[2]
+                if self.ui.detail.get() != detail:
+                    self.ui.detail.set(detail)
             elif kind == 'output':
                 self.ui.output.set(value)
             elif kind == 'closed':
@@ -255,6 +294,9 @@ def main():
         DATA_DIR / 'bridge.log', maxBytes=250000, backupCount=2, encoding='utf-8')],
         format='%(asctime)s %(levelname)s %(message)s')
     logging.info('Process starting; pid=%s', os.getpid())
+    # Keep native/Python fatal diagnostics even in a windowless executable.
+    fatal_log = (DATA_DIR / 'crash.log').open('w', encoding='utf-8')
+    faulthandler.enable(file=fatal_log, all_threads=True)
     try:
         if not (DATA_DIR / 'settings.json').exists():
             from idle_display import settings_from
@@ -270,6 +312,8 @@ def main():
                 logging.exception('Could not migrate startup registration')
         TrayApp(show_event).run()
     finally:
+        faulthandler.disable()
+        fatal_log.close()
         kernel.CloseHandle(handle)
         if show_event:
             kernel.CloseHandle(show_event)
