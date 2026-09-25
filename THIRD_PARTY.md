@@ -26,3 +26,18 @@ functools.lru_cache in place of LDDC's application-level caching dependency.
 Dependencies retain their upstream licenses. The Python package requirements are
 listed in requirements.txt. No song audio, lyric cache, user logs, or account data
 is included in the release.
+
+
+## Built-in CPU sensor worker (v1.1.2)
+
+- LibreHardwareMonitor 0.9.6, MPL-2.0. Unmodified separate DLL.
+  https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/tree/v0.9.6
+  Source commit: 3d331e3370efb858411f19511373eff65a218701.
+- Embedded PawnIO.Modules 0.1.6, LGPL-2.1, unchanged.
+  https://github.com/namazso/PawnIO.Modules/tree/0.1.6
+- Their full source archives and licenses are in `licenses/cpu-sensors/`.
+- Additional managed runtime dependencies retain their upstream licenses in
+  `licenses/cpu-sensors/dependencies/`.
+
+The sensor worker is original GPL-3.0-only code. No NVIDIA SDK is redistributed.
+The system PawnIO driver is not bundled or installed by the app.

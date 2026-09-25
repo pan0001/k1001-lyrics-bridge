@@ -2,7 +2,7 @@
 from datetime import datetime
 from string import Formatter
 
-DEFAULTS = dict(source='QQMusic.exe', lyrics=True, idle_enabled=True,
+DEFAULTS = dict(source='QQMusic.exe', lyrics=True, idle_enabled=True, auto_update_check=True,
                 idle_minutes=5.0, idle_mode='system', rotation_seconds=5,
                 metrics=['cpu', 'frequency', 'cpu_temp', 'memory', 'gpu', 'gpu_temp'],
                 custom_text='现在是 {time}\nCPU {cpu}% · 内存 {memory}%\nGPU {gpu}% · {gpu_temp}°C')
@@ -31,7 +31,7 @@ def settings_from(value):
     out = dict(DEFAULTS, metrics=list(DEFAULTS['metrics']))
     if not isinstance(value, dict):
         return out
-    for key in ('lyrics', 'idle_enabled'):
+    for key in ('lyrics', 'idle_enabled', 'auto_update_check'):
         if isinstance(value.get(key), bool):
             out[key] = value[key]
     if isinstance(value.get('source'), str):

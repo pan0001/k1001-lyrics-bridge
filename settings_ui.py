@@ -5,6 +5,7 @@ from pathlib import Path
 from PIL import Image, ImageTk
 from window_chrome import TitleBar, SlimScroll
 from idle_display import METRICS, validate_template
+from version import VERSION
 from blue_widgets import BLUE, CYAN, NAVY, MUTED, BG, LINE, YELLOW, FONT
 from blue_widgets import Pattern, CutButton, Toggle, MetricChip, StatCard, Screen, unchanged_size
 
@@ -56,7 +57,7 @@ class SettingsWindow:
             header.create_text(228, 24, text='SKYLYRICS', anchor='w', fill=NAVY, font=('Segoe UI',17,'bold','italic'))
             header.create_text(67, 50, text='让每一段日常，都有自己的旋律。', anchor='w', fill=MUTED, font=(FONT,9))
             header.create_text(w-7, 20, text='DESKTOP  /  CONTROL PANEL', anchor='e', fill=MUTED, font=('Segoe UI',9))
-            header.create_text(w-7, 44, text='本地运行  ·  v1.1.1', anchor='e', fill=BLUE, font=(FONT,9))
+            header.create_text(w-7, 44, text=f'本地运行  ·  v{VERSION}', anchor='e', fill=BLUE, font=(FONT,9))
             header.create_line(0, 69, w, 69, fill=LINE)
         header.bind('<Configure>', draw_header)
         body = tk.Frame(shell, bg=BG)
@@ -69,7 +70,7 @@ class SettingsWindow:
         rail.pack_propagate(False)
         self.label(rail, 'WORKSPACE', 9, MUTED, BG, english=True).pack(anchor='w', padx=12, pady=(8,18))
         self.nav = []
-        for index, title in enumerate(['自动切换', '文字编辑', '常规设置']):
+        for index, title in enumerate(['自动切换', '文字编辑', '常规设置', '软件更新']):
             button = CutButton(rail, f'0{index+1}   {title}', lambda i=index:self.switch(i), width=164, height=52)
             button.pack(fill='x', pady=(0,10))
             self.nav.append(button)
@@ -121,13 +122,13 @@ class SettingsWindow:
         self.form_id=self.form_canvas.create_window(0,0,window=self.form,anchor='nw')
         self.form_canvas.bind('<Configure>',lambda e:self.form_canvas.itemconfigure(self.form_id,width=e.width))
         self.form.bind('<Configure>',lambda e:self.form_canvas.configure(scrollregion=self.form_canvas.bbox('all')))
-        self.pages=[tk.Frame(self.form,bg='white') for _ in range(3)]
+        self.pages=[tk.Frame(self.form,bg='white') for _ in range(4)]
         s=app.settings
         self.enabled=tk.BooleanVar(value=s['idle_enabled'])
         self.minutes=tk.StringVar(value=f"{s['idle_minutes']:g}")
         self.rotation=tk.StringVar(value=f"{s['rotation_seconds']:g}")
         self.mode=tk.StringVar(value=s['idle_mode'])
-        auto,custom,general=self.pages
+        auto,custom,general,updates=self.pages
         self.section(auto,'01','在音乐暂停之后')
         row=tk.Frame(auto,bg='white');row.pack(fill='x',pady=(15,3))
         self.label(row,'自动进入待机显示',11).pack(side='left')
@@ -185,7 +186,39 @@ class SettingsWindow:
             self.label(row,text,10).pack(side='left');Toggle(row,var).pack(side='right')
         self.label(general,'自启动时不显示面板。双击托盘图标，或右键\n选择「打开控制面板」，就能回到这里。',9,MUTED,wrap=380).pack(anchor='w',pady=(10,5))
         self.divider(general);self.section(general,'02','关于传感器')
-        self.label(general,'CPU 温度需要兼容的传感器数据源，例如\nLibre Hardware Monitor / Open Hardware Monitor。\n\n显示「未接入」不代表硬件异常。可以接入数据源，\n或在「自动切换」中关闭这项轮播。\nCPU 频率为 Windows 性能计数器估算值。',9,MUTED,wrap=390).pack(anchor='w',pady=(12,0))
+        self.label(general,'配置一次，之后登录 Windows 自动恢复 CPU 温度。\n首次配置需在 Windows 弹窗中授权。\n支持兼容的 AMD / Intel 处理器，需已安装 PawnIO。\n\n采集程序独立运行，主界面与歌词保持普通权限。\n只在显示数据时读取；不用时停止硬件采样。\n可随时关闭温度自动启动，其他功能照常工作。',9,MUTED,wrap=390).pack(anchor='w',pady=(12,8))
+        CutButton(general,'配置 / 修复温度自动启动',self.enable_temperature,width=340,height=40,primary=True,small=True).pack(fill='x',pady=(4,8))
+        CutButton(general,'关闭温度自动启动',lambda:self.enable_temperature(remove=True),width=340,height=36,small=True).pack(fill='x',pady=(0,8))
+        self.temperature_note=tk.StringVar(value='启用后会显示授权和采集状态。')
+        tk.Label(general,textvariable=self.temperature_note,bg='white',fg=MUTED,wraplength=380,justify='left',font=(FONT,9)).pack(anchor='w')
+        self.section(updates,'01','让晴空保持最新')
+        self.label(updates,f'当前版本  v{VERSION}  /  Windows x64',10,BLUE).pack(anchor='w',pady=(16,10))
+        self.auto_update=tk.BooleanVar(value=s['auto_update_check'])
+        row=tk.Frame(updates,bg='white');row.pack(fill='x',pady=8)
+        self.label(row,'自动检查 GitHub 更新',10).pack(side='left')
+        Toggle(row,self.auto_update).pack(side='right')
+        self.label(updates,'每天检查一次正式版，发现新版时通知。\n点击安装后才下载、重启。开关修改后请保存设置。',9,MUTED,wrap=380).pack(anchor='w',pady=(6,12))
+        self.update_note=tk.StringVar(value='等待检查更新。')
+        try:
+            import json
+            from bridge import DATA_DIR
+            result=json.loads((DATA_DIR/'update-result.json').read_text(encoding='utf-8-sig'))
+            self.update_note.set(result['message'])
+        except (OSError,ValueError,KeyError,TypeError):
+            pass
+        tk.Label(updates,textvariable=self.update_note,bg='white',fg=BLUE,wraplength=380,justify='left',font=(FONT,10)).pack(anchor='w',pady=8)
+        CutButton(updates,'立即检查更新',app.check_updates,width=340,height=40,small=True).pack(fill='x',pady=4)
+        self.available_release=None
+        self.update_busy=False
+        self.install_button=CutButton(updates,'暂无可安装更新',lambda:None,width=340,height=40,small=True)
+        self.install_button.pack(fill='x',pady=4)
+        import webbrowser
+        from updater import RELEASES_URL
+        CutButton(updates,'打开 GitHub 发布页',lambda:webbrowser.open(RELEASES_URL),width=340,height=36,small=True).pack(fill='x',pady=4)
+        self.divider(updates)
+        self.section(updates,'02','更新说明')
+        self.update_notes=tk.StringVar(value='检查到新版本后，会在这里显示更新内容。')
+        tk.Label(updates,textvariable=self.update_notes,bg='white',fg=MUTED,wraplength=380,justify='left',font=(FONT,9)).pack(anchor='w',pady=(12,0))
         preview=tk.Frame(panels,bg='white',width=262,highlightbackground=LINE,highlightthickness=1)
         preview.grid(row=0,column=1,sticky='nsew');preview.grid_propagate(False)
         preview.grid_columnconfigure(0,weight=1)
@@ -250,7 +283,7 @@ class SettingsWindow:
     def switch(self,index):
         for page in self.pages:page.pack_forget()
         self.pages[index].pack(fill='both',expand=True)
-        self.page_title.set(['自动切换','文字编辑','常规设置'][index])
+        self.page_title.set(['自动切换','文字编辑','常规设置','软件更新'][index])
         for i,button in enumerate(self.nav):
             button.primary=i==index;button.paint()
         self.form_canvas.yview_moveto(0)
@@ -260,6 +293,23 @@ class SettingsWindow:
 
     def update_sources(self, sources):
         self.source_box.configure(values=['自动选择'] + sorted(set(sources + [self.source.get()]) - {'自动选择'}))
+
+    def update_state(self, value):
+        if value.get('text'):
+            self.update_note.set(value['text'])
+        if 'release' in value:
+            release=value['release']
+            self.available_release=release
+            self.update_notes.set(release['notes'] if release else '暂时没有比当前版本更新的正式版。')
+        if 'busy' in value:
+            self.update_busy=value['busy']
+        available=self.available_release and not self.update_busy
+        self.install_button.text=('下载并安装 '+self.available_release['version']) if available else ('请稍候…' if self.update_busy else '暂无可安装更新')
+        self.install_button.primary=bool(available)
+        self.install_button.command=self.app.install_update if available else lambda:None
+        self.install_button.paint()
+        if value.get('notify'):
+            self.message.set(value['text']+' · 在「软件更新」中查看。')
 
     def update_stats(self, snapshot):
         if snapshot == self.last_stats:
@@ -271,8 +321,17 @@ class SettingsWindow:
             return str(snapshot[key])+unit if snapshot.get(key) is not None else '未接入'
         self.sensors.set('CPU 频率  '+('~'+value('cpu_ghz',' GHz') if snapshot.get('cpu_ghz') else '未接入')+
                          '    /    CPU 温度  '+value('cpu_temp','°C')+'    /    GPU 温度  '+value('gpu_temp','°C'))
-        self.sensor_note.set('CPU 温度未接入传感器，可在「常规设置」查看说明。' if snapshot.get('cpu_temp') is None else
-                             '本机传感器数据已更新。')
+        from cpu_temperature import STATUS_TEXT
+        note = STATUS_TEXT.get(snapshot.get('cpu_temp_status'), 'CPU 温度：在「常规设置」查看采集状态。')
+        if snapshot.get('cpu_temp_source') == 'external':
+            note = 'CPU 温度来自外部监控工具。'
+        self.sensor_note.set(note)
+        self.temperature_note.set(note)
+
+    def enable_temperature(self, remove=False):
+        from cpu_temperature import STATUS_TEXT
+        self.app.bridge.stats.enable_cpu_temperature(remove=remove)
+        self.temperature_note.set(STATUS_TEXT.get(self.app.bridge.stats.temperature.status, '正在准备采集。'))
 
     def save(self, preview=False):
         try:
@@ -286,7 +345,8 @@ class SettingsWindow:
                 raise ValueError('请至少选择一项系统信息。')
             settings = dict(source='' if self.source.get() == '自动选择' else self.source.get(),
                             lyrics=self.lyrics.get(), idle_enabled=self.enabled.get(), idle_minutes=minutes,
-                            rotation_seconds=rotation, idle_mode=self.mode.get(), metrics=metrics, custom_text=text)
+                            rotation_seconds=rotation, idle_mode=self.mode.get(), metrics=metrics, custom_text=text,
+                            auto_update_check=self.auto_update.get())
             return self.app.apply_settings(settings, self.startup.get(), preview=preview)
         except Exception as exc:
             self.message.set(str(exc) if isinstance(exc, ValueError) else '保存失败，请检查程序日志后重试。')

@@ -109,12 +109,40 @@ class TrayApp:
         except (OSError, ValueError):
             saved = {}
         self.settings = settings_from(saved)
+        from updater import Updater
+        self.updater = Updater(self.events, DATA_DIR)
         self.selected = self.settings['source']
         self.lyrics_enabled = self.settings['lyrics']
         self.icon = pystray.Icon('K1001Bridge', make_image(), '晴空歌词 · SkyLyrics', self.menu())
         self.ui = SettingsWindow(self.root, self)
         self.root.protocol('WM_DELETE_WINDOW', self.hide)
         self.root.after(100, self.consume_events)
+        self.root.after(30000, self.check_updates_automatically)
+
+    def check_updates_automatically(self):
+        if self.quit_event.is_set():
+            return
+        if self.settings['auto_update_check']:
+            self.updater.check()
+        self.root.after(60 * 60 * 1000, self.check_updates_automatically)
+
+    def check_updates(self):
+        self.show()
+        self.ui.switch(3)
+        self.updater.check(manual=True)
+
+    def install_update(self):
+        from tkinter import messagebox
+        if self.updater.busy:
+            return
+        if not self.updater.release:
+            self.updater.check(manual=True)
+            return
+        if self.saving:
+            self.ui.update_note.set('请等待设置保存完成后再安装。')
+            return
+        if messagebox.askokcancel('安装更新', '下载完成后会重启晴空歌词，转发将短暂停止。\n已保存的设置会保留；未保存的修改不会保留。\n\n现在下载并安装吗？', parent=self.root):
+            self.updater.install()
 
     def post(self, action):
         self.events.put(('ui_action', action))
@@ -128,6 +156,7 @@ class TrayApp:
             pystray.MenuItem('停止转发', lambda: self.bridge.submit('stop')),
             pystray.MenuItem('预览待机显示 15 秒', lambda: self.bridge.submit('preview_idle')),
             pystray.MenuItem('开机自启动', lambda: self.post('startup'), checked=lambda item: startup_enabled()),
+            pystray.MenuItem('检查更新', lambda: self.post('update')),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem('退出', lambda: self.post('exit')),
         )
@@ -211,6 +240,18 @@ class TrayApp:
                     return
                 elif value == 'startup':
                     self.toggle_startup()
+                elif value == 'update':
+                    self.check_updates()
+            elif kind == 'update_state':
+                self.ui.update_state(value)
+                if value.get('notify'):
+                    try:
+                        self.icon.notify('发现新版，可在控制面板的「软件更新」下载。', '晴空歌词更新')
+                    except Exception:
+                        logging.info('Update notification unavailable')
+            elif kind == 'update_install_ready':
+                self.exit()
+                return
             elif kind == 'settings_saved':
                 self.saving = False
                 new, preview = value
@@ -232,6 +273,8 @@ class TrayApp:
             elif kind == 'ready':
                 self.bridge.submit('settings', self.settings)
                 self.bridge.submit('auto', self.selected)
+                from updater import signal_ready
+                signal_ready()
             elif kind == 'choices':
                 self.choices = value
                 self.ui.update_sources(value)

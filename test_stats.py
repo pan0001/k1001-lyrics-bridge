@@ -12,8 +12,10 @@ class StatsTests(unittest.TestCase):
         sampler.nvidia = nvidia
         sampler.set_active('test', True)
         sampler._wake.wait = lambda _: sampler.stop_event.set()
-        with patch.object(sampler, 'run_command', side_effect=responses) as run:
+        with patch.object(sampler, 'run_command', side_effect=responses) as run, \
+             patch.object(sampler.temperature, 'sample', return_value={'cpu_temp_status': 'unavailable'}):
             sampler._run()
+        sampler.close()
         return sampler.snapshot(), run
 
     def test_hidden_unused_sampler_does_not_query_hardware(self):
@@ -23,7 +25,8 @@ class StatsTests(unittest.TestCase):
             queried.set()
             return NS(returncode=0, stdout='{}')
         sampler.nvidia = None
-        with patch.object(sampler, 'run_command', side_effect=query):
+        with patch.object(sampler, 'run_command', side_effect=query), \
+             patch.object(sampler.temperature, 'sample', return_value={'cpu_temp_status': 'unavailable'}):
             sampler.start()
             self.assertFalse(queried.wait(.15))
             sampler.set_active('panel', True)

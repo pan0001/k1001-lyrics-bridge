@@ -9,6 +9,7 @@ import threading
 import time
 
 import psutil
+from cpu_temperature import CpuTemperature
 
 SENSOR_SCRIPT = r'''
 $ErrorActionPreference = 'Stop'
@@ -52,6 +53,12 @@ class SystemStats:
         self.nvidia = shutil.which('nvidia-smi')
         self._consumers = set()
         self._wake = threading.Event()
+        self.temperature = CpuTemperature()
+
+    def enable_cpu_temperature(self, remove=False):
+        result = self.temperature.request_enable(remove=remove)
+        self._wake.set()
+        return result
 
     def set_active(self, consumer, enabled):
         with self._lock:
@@ -77,6 +84,7 @@ class SystemStats:
     def close(self):
         self.stop_event.set()
         self._wake.set()
+        self.temperature.close()
 
     @staticmethod
     def run_command(args, **kwargs):
@@ -121,6 +129,13 @@ class SystemStats:
                     values.update({k: v for k, v in sensor.items() if v is not None and k not in values})
             except (OSError, subprocess.SubprocessError, ValueError):
                 pass
+            # The privileged CPU library lives in a separate process. All requests
+            # are bounded and this loop is independent from lyrics and Tk callbacks.
+            temperature = self.temperature.sample()
+            values.update(temperature)
+            if 'cpu_temp' in values and 'cpu_temp_source' not in values:
+                values['cpu_temp_source'] = 'external'
+                values['cpu_temp_status'] = 'ready'
             try:
                 values['cpu'] = round(psutil.cpu_percent(None))
                 values['memory'] = round(psutil.virtual_memory().percent)
