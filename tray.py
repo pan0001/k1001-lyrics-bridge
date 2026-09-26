@@ -9,6 +9,7 @@ import queue
 import sys
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import winreg
 from pathlib import Path
@@ -45,8 +46,52 @@ def legacy_startup_enabled():
         return False
 
 
+def legacy_startup_present():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            winreg.QueryValueEx(key, RUN_NAME)
+            return True
+    except FileNotFoundError:
+        return False
+
+
 def startup_enabled():
     return startup_link().exists() or old_startup_link().exists() or legacy_startup_enabled()
+
+
+def startup_signature():
+    try:
+        stat = startup_link().stat()
+        return dict(command=startup_command(), size=stat.st_size, modified=stat.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def save_startup_signature(enabled):
+    cache = DATA_DIR / 'startup-registration.json'
+    try:
+        if enabled:
+            temporary = cache.with_suffix('.tmp')
+            temporary.write_text(json.dumps(startup_signature()), encoding='utf-8')
+            temporary.replace(cache)
+        else:
+            cache.unlink(missing_ok=True)
+    except OSError:
+        logging.info('Could not cache startup registration')
+
+
+def repair_startup(initial=False):
+    if not initial and not startup_enabled():
+        return
+    signature = startup_signature()
+    try:
+        cached = json.loads((DATA_DIR / 'startup-registration.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        cached = None
+    if (not initial and signature and cached == signature and
+            not old_startup_link().exists() and not legacy_startup_present()):
+        return
+    set_startup(True)
 
 
 def set_startup(enabled):
@@ -79,6 +124,35 @@ $shortcut.Save()
             winreg.DeleteValue(key, RUN_NAME)
         except FileNotFoundError:
             pass
+    save_startup_signature(enabled)
+
+
+def take_ui_events(events, limit=100, budget=.004):
+    """Collapse superseded telemetry without reordering settings or user actions."""
+    batch, latest = [], {}
+    deadline = time.monotonic() + budget
+    for _ in range(limit):
+        if time.monotonic() >= deadline:
+            break
+        try:
+            kind, value = events.get_nowait()
+        except queue.Empty:
+            break
+        if kind in ('status', 'error', 'track', 'output', 'choices', 'update_state'):
+            key = 'status' if kind == 'error' else kind
+            if key in latest:
+                index = latest[key]
+                if kind == 'update_state':
+                    previous = batch[index][1]
+                    value = dict(previous, **{k: v for k, v in value.items() if k != 'text' or v})
+                batch[index] = (kind, value)
+            else:
+                latest[key] = len(batch)
+                batch.append((kind, value))
+        else:
+            latest.clear()
+            batch.append((kind, value))
+    return batch
 
 
 def make_image():
@@ -87,7 +161,7 @@ def make_image():
 
 
 class TrayApp:
-    def __init__(self, show_event=None):
+    def __init__(self, show_event=None, initialize_startup=False):
         import tkinter as tk
         from settings_ui import SettingsWindow
         from idle_display import settings_from
@@ -97,6 +171,13 @@ class TrayApp:
             'UI callback failed', exc_info=(kind, value, tb))
         self.events = queue.Queue()
         self.settings_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='SettingsIO')
+        self.tray_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='TrayIO')
+        self._tray_lock = threading.Lock()
+        self._tray_pending = {}
+        self._tray_scheduled = False
+        self._startup_refresh_pending = False
+        self.startup_active = None
+        self.initialize_startup = initialize_startup
         self.saving = False
         self.bridge = Bridge(self.events)
         self.quit_event = threading.Event()
@@ -155,7 +236,7 @@ class TrayApp:
             pystray.MenuItem('开始转发', lambda: self.bridge.submit('auto', self.selected)),
             pystray.MenuItem('停止转发', lambda: self.bridge.submit('stop')),
             pystray.MenuItem('预览待机显示 15 秒', lambda: self.bridge.submit('preview_idle')),
-            pystray.MenuItem('开机自启动', lambda: self.post('startup'), checked=lambda item: startup_enabled()),
+            pystray.MenuItem('开机自启动', lambda: self.post('startup'), checked=lambda item: bool(self.startup_active)),
             pystray.MenuItem('检查更新', lambda: self.post('update')),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem('退出', lambda: self.post('exit')),
@@ -172,12 +253,14 @@ class TrayApp:
         def write():
             try:
                 # Startup target repair already runs once at application launch.
-                if startup != startup_enabled():
+                # None means the asynchronous query has not completed and the
+                # user has not edited this setting. Preserve the real state.
+                if startup is not None and startup != startup_enabled():
                     set_startup(startup)
                 temp = self.config.with_suffix('.tmp')
                 temp.write_text(json.dumps(new, ensure_ascii=False, indent=2), encoding='utf-8')
                 temp.replace(self.config)
-                self.events.put(('settings_saved', (new, preview)))
+                self.events.put(('settings_saved', (new, preview, startup)))
             except Exception:
                 logging.exception('Could not save settings')
                 self.events.put(('settings_failed', None))
@@ -194,12 +277,59 @@ class TrayApp:
                 self.events.put(('settings_failed', None))
         self.settings_worker.submit(write)
 
+    def refresh_startup(self):
+        if self._startup_refresh_pending or self.quit_event.is_set():
+            return
+        self._startup_refresh_pending = True
+        def read():
+            try:
+                value = startup_enabled()
+            except OSError:
+                logging.exception('Could not read startup registration')
+                value = None
+            self.events.put(('startup_state', value))
+        self.settings_worker.submit(read)
+
+    def prepare_startup(self):
+        try:
+            repair_startup(self.initialize_startup)
+            self.events.put(('startup_saved', None))
+        except (OSError, subprocess.SubprocessError):
+            logging.exception('Could not repair startup registration')
+
+    def update_tray(self, **values):
+        # Shell calls can wait on Explorer. Keep them off the Tk event loop and
+        # retain only the newest pending title/menu/notification while busy.
+        with self._tray_lock:
+            self._tray_pending.update(values)
+            if self._tray_scheduled:
+                return
+            self._tray_scheduled = True
+        self.tray_worker.submit(self._flush_tray_updates)
+
+    def _flush_tray_updates(self):
+        while True:
+            with self._tray_lock:
+                values, self._tray_pending = self._tray_pending, {}
+                if not values:
+                    self._tray_scheduled = False
+                    return
+            try:
+                if 'title' in values:
+                    self.icon.title = values['title']
+                if values.get('menu'):
+                    self.icon.update_menu()
+                if values.get('notify'):
+                    self.icon.notify(values['notify'], '晴空歌词更新')
+            except Exception:
+                logging.exception('Could not update tray icon')
+
     def show(self):
         self.bridge.stats.set_active('panel', True)
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
-        self.ui.refresh_startup()
+        self.refresh_startup()
 
     def hide(self):
         self.root.withdraw()
@@ -211,7 +341,8 @@ class TrayApp:
         self.quit_event.set()
         self.root.withdraw()
         self.bridge.submit('close')
-        self.icon.stop()
+        self.tray_worker.submit(self.icon.stop)
+        self.tray_worker.shutdown(wait=False)
         self.settings_worker.shutdown(wait=False)
         self.root.after(100, self.finish_exit)
 
@@ -227,11 +358,7 @@ class TrayApp:
         self.bridge.stats.set_active('panel', self.root.state() in ('normal', 'zoomed'))
         if self.show_event and ctypes.windll.kernel32.WaitForSingleObject(ctypes.c_void_p(self.show_event), 0) == 0:
             self.show()
-        for _ in range(100):
-            try:
-                kind, value = self.events.get_nowait()
-            except queue.Empty:
-                break
+        for kind, value in take_ui_events(self.events):
             if kind == 'ui_action':
                 if value == 'show':
                     self.show()
@@ -245,28 +372,30 @@ class TrayApp:
             elif kind == 'update_state':
                 self.ui.update_state(value)
                 if value.get('notify'):
-                    try:
-                        self.icon.notify('发现新版，可在控制面板的「软件更新」下载。', '晴空歌词更新')
-                    except Exception:
-                        logging.info('Update notification unavailable')
+                    self.update_tray(notify='发现新版，可在控制面板的「软件更新」下载。')
             elif kind == 'update_install_ready':
                 self.exit()
                 return
             elif kind == 'settings_saved':
                 self.saving = False
-                new, preview = value
+                new, preview, startup = value
                 self.settings = new
                 self.selected = new['source']
                 self.lyrics_enabled = new['lyrics']
+                self.ui.startup_saved(startup)
                 self.bridge.submit('settings', new)
                 if preview:
                     self.bridge.submit('preview_idle')
                 self.ui.message.set('正在预览待机内容，15 秒后恢复自动模式。' if preview else '已保存 · 设置即时生效。')
-                self.ui.refresh_startup()
-                self.icon.update_menu()
+                self.refresh_startup()
             elif kind == 'startup_saved':
-                self.ui.refresh_startup()
-                self.icon.update_menu()
+                self.refresh_startup()
+            elif kind == 'startup_state':
+                self._startup_refresh_pending = False
+                if value is not None:
+                    self.startup_active = value
+                    self.ui.receive_startup_state(value)
+                    self.update_tray(menu=True)
             elif kind == 'settings_failed':
                 self.saving = False
                 self.ui.message.set('保存失败，请检查程序日志后重试。')
@@ -281,7 +410,7 @@ class TrayApp:
             elif kind in ('status', 'error'):
                 if self.status != value:
                     self.status = value
-                    self.icon.title = ('晴空歌词 · ' + value)[:127]
+                    self.update_tray(title=('晴空歌词 · ' + value)[:127])
                     self.ui.status.set(value)
             elif kind == 'track':
                 if self.ui.track.get() != value[0]:
@@ -290,7 +419,8 @@ class TrayApp:
                 if self.ui.detail.get() != detail:
                     self.ui.detail.set(detail)
             elif kind == 'output':
-                self.ui.output.set(value)
+                if self.ui.output.get() != value:
+                    self.ui.output.set(value)
             elif kind == 'closed':
                 self.status = '转发服务已停止，请重新启动程序'
                 self.ui.status.set(self.status)
@@ -303,6 +433,7 @@ class TrayApp:
         logging.info('Tray ready; pid=%s', os.getpid())
 
     def run(self):
+        self.settings_worker.submit(self.prepare_startup)
         self.bridge.start_thread()
         threading.Thread(target=lambda: self.icon.run(setup=self.setup), daemon=True).start()
         if '--background' not in sys.argv:
@@ -341,19 +472,11 @@ def main():
     fatal_log = (DATA_DIR / 'crash.log').open('w', encoding='utf-8')
     faulthandler.enable(file=fatal_log, all_threads=True)
     try:
-        if not (DATA_DIR / 'settings.json').exists():
+        initial = not (DATA_DIR / 'settings.json').exists()
+        if initial:
             from idle_display import settings_from
-            try:
-                set_startup(True)
-            except (OSError, subprocess.SubprocessError):
-                logging.exception('Could not enable initial startup registration')
             (DATA_DIR / 'settings.json').write_text(json.dumps(settings_from({}), ensure_ascii=False, indent=2), encoding='utf-8')
-        if startup_enabled():
-            try:
-                set_startup(True)
-            except (OSError, subprocess.SubprocessError):
-                logging.exception('Could not migrate startup registration')
-        TrayApp(show_event).run()
+        TrayApp(show_event, initialize_startup=initial).run()
     finally:
         faulthandler.disable()
         fatal_log.close()

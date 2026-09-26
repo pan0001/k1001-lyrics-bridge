@@ -19,6 +19,7 @@ REPOSITORY = 'pan0001/k1001-lyrics-bridge'
 RELEASES_URL = f'https://github.com/{REPOSITORY}/releases'
 API_URL = f'https://api.github.com/repos/{REPOSITORY}/releases/latest'
 INTERVAL = 24 * 60 * 60
+RETRY_INTERVAL = 60 * 60
 MAX_DOWNLOAD = 300 * 1024 * 1024
 MAX_EXPANDED = 900 * 1024 * 1024
 
@@ -140,16 +141,31 @@ class Updater:
         self.busy = False
         self.lock = threading.Lock()
         self.cache = self.data_dir/'update-check.json'
+        self._check_state = None
 
     def emit(self, text, **values):
         self.events.put(('update_state', dict(text=text, **values)))
 
     def due(self):
         try:
-            last = float(json.loads(self.cache.read_text(encoding='utf-8'))['attempt'])
-            return not 0 <= time.time() - last < INTERVAL
+            if self._check_state is None:
+                self._check_state = json.loads(self.cache.read_text(encoding='utf-8'))
+            last = float(self._check_state['attempt'])
+            interval = INTERVAL if self._check_state.get('success', True) else RETRY_INTERVAL
+            return not 0 <= time.time() - last < interval
         except (OSError, ValueError, KeyError, TypeError):
             return True
+
+    def _record_check(self, success):
+        # Scheduling still works in memory if the optional disk cache is unavailable.
+        self._check_state = {'attempt': time.time(), 'success': success}
+        temporary = self.cache.with_suffix('.tmp')
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(self._check_state), encoding='utf-8')
+            temporary.replace(self.cache)
+        except OSError as exc:
+            logging.info('Cannot save update check time: %s', exc)
 
     def check(self, manual=False):
         with self.lock:
@@ -159,9 +175,10 @@ class Updater:
         def work():
             self.emit('正在连接 GitHub…', busy=True)
             try:
-                self.cache.write_text(json.dumps({'attempt': time.time()}), encoding='utf-8')
+                self._record_check(False)
                 data = fetch_release()
                 self.release = select_release(data)
+                self._record_check(True)
                 if self.release:
                     self.emit(f'发现新版 {self.release["version"]}', release=self.release, notify=not manual)
                 else:

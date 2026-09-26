@@ -120,8 +120,10 @@ class SettingsWindow:
         root.bind('<MouseWheel>', self.scroll_form, add='+')
         self.form=tk.Frame(self.form_canvas,bg='white',padx=20,pady=18)
         self.form_id=self.form_canvas.create_window(0,0,window=self.form,anchor='nw')
-        self.form_canvas.bind('<Configure>',lambda e:self.form_canvas.itemconfigure(self.form_id,width=e.width))
-        self.form.bind('<Configure>',lambda e:self.form_canvas.configure(scrollregion=self.form_canvas.bbox('all')))
+        self._form_width = None
+        self._form_size = None
+        self.form_canvas.bind('<Configure>', self.resize_form)
+        self.form.bind('<Configure>', self.update_scroll_region)
         self.pages=[tk.Frame(self.form,bg='white') for _ in range(4)]
         s=app.settings
         self.enabled=tk.BooleanVar(value=s['idle_enabled'])
@@ -180,7 +182,13 @@ class SettingsWindow:
         self.source=tk.StringVar(value=s['source'] or '自动选择')
         self.source_box=ttk.Combobox(general,textvariable=self.source,state='readonly',values=[s['source'] or '自动选择','自动选择'])
         self.source_box.pack(fill='x',pady=(0,16))
-        self.lyrics=tk.BooleanVar(value=s['lyrics']);self.startup=tk.BooleanVar();self.refresh_startup()
+        self.lyrics=tk.BooleanVar(value=s['lyrics'])
+        self.startup=tk.BooleanVar()
+        self._startup_known = False
+        self._startup_dirty = False
+        self._startup_applying = False
+        self.startup.trace_add('write', self.startup_edited)
+        self.refresh_startup()
         for text,var in [('显示 QQ 音乐歌词',self.lyrics),('登录 Windows 后自动启动',self.startup)]:
             row=tk.Frame(general,bg='white');row.pack(fill='x',pady=9)
             self.label(row,text,10).pack(side='left');Toggle(row,var).pack(side='right')
@@ -235,7 +243,24 @@ class SettingsWindow:
         self.label(footer,'✦',16,'#e8be42',BG).pack(side='left',padx=(0,10))
         tk.Label(footer,textvariable=self.message,bg=BG,fg=MUTED,wraplength=700,justify='left',font=(FONT,9)).pack(side='left',fill='x',expand=True)
         CutButton(footer,'保存设置   →',self.save,width=164,height=45,primary=True).pack(side='right',padx=(12,0))
+        self.current_page = None
         self.switch(0)
+
+    def resize_form(self, event):
+        # Configure also reports moves/height changes; only a new width changes
+        # the embedded form's layout.
+        if event.width != self._form_width:
+            self._form_width = event.width
+            self.form_canvas.itemconfigure(self.form_id, width=event.width)
+
+    def update_scroll_region(self, event):
+        # Scrolling moves the embedded Frame and emits Configure on every step.
+        # Its position is not a content-size change: avoid a redundant canvas
+        # configure/scrollbar layout for each movement.
+        size = (event.width, event.height)
+        if size != self._form_size:
+            self._form_size = size
+            self.form_canvas.configure(scrollregion=(0, 0, *size))
 
     def scroll_form(self, event):
         # One pixel-based canvas scroll per input event; no animation timer.
@@ -281,15 +306,47 @@ class SettingsWindow:
         return frame
 
     def switch(self,index):
-        for page in self.pages:page.pack_forget()
+        if self.current_page == index:
+            return
+        previous = self.current_page
+        if previous is not None:
+            self.pages[previous].pack_forget()
         self.pages[index].pack(fill='both',expand=True)
         self.page_title.set(['自动切换','文字编辑','常规设置','软件更新'][index])
-        for i,button in enumerate(self.nav):
-            button.primary=i==index;button.paint()
+        self.current_page = index
+        for i in (previous, index):
+            if i is not None:
+                self.nav[i].primary = i == index
+                self.nav[i].paint()
         self.form_canvas.yview_moveto(0)
     def refresh_startup(self):
-        from tray import startup_enabled
-        self.startup.set(startup_enabled())
+        self.app.refresh_startup()
+
+    def startup_edited(self, *_):
+        if not self._startup_applying:
+            self._startup_dirty = True
+
+    def receive_startup_state(self, value):
+        if value is None:
+            return
+        self._startup_known = True
+        if not self._startup_dirty:
+            self._startup_applying = True
+            try:
+                self.startup.set(value)
+            finally:
+                self._startup_applying = False
+
+    def startup_choice(self):
+        # The unchecked initial toggle is a placeholder while IO is pending.
+        # Saving other settings must not silently disable an existing shortcut.
+        return self.startup.get() if self._startup_known or self._startup_dirty else None
+
+    def startup_saved(self, requested):
+        if requested is not None:
+            self._startup_known = True
+            if self.startup.get() == requested:
+                self._startup_dirty = False
 
     def update_sources(self, sources):
         self.source_box.configure(values=['自动选择'] + sorted(set(sources + [self.source.get()]) - {'自动选择'}))
@@ -347,7 +404,7 @@ class SettingsWindow:
                             lyrics=self.lyrics.get(), idle_enabled=self.enabled.get(), idle_minutes=minutes,
                             rotation_seconds=rotation, idle_mode=self.mode.get(), metrics=metrics, custom_text=text,
                             auto_update_check=self.auto_update.get())
-            return self.app.apply_settings(settings, self.startup.get(), preview=preview)
+            return self.app.apply_settings(settings, self.startup_choice(), preview=preview)
         except Exception as exc:
             self.message.set(str(exc) if isinstance(exc, ValueError) else '保存失败，请检查程序日志后重试。')
             return False

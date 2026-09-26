@@ -19,6 +19,7 @@ class TitleBar(tk.Frame):
         self.user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
         self.user32.PostMessageW.restype = wintypes.BOOL
         self.last_state = None
+        self.last_size = None
         self.logo = tk.Label(self, image=image, bg=BG)
         self.logo.pack(side='left', padx=(18, 6))
         label = tk.Label(self, text='晴空歌词  /  SKYLYRICS', bg=BG, fg=NAVY, font=(FONT, 9))
@@ -34,8 +35,13 @@ class TitleBar(tk.Frame):
             button.bind('<Enter>', lambda e,b=button,c=closing:b.configure(bg='#fce3e8' if c else '#e3f3fe'))
             button.bind('<Leave>', lambda e,b=button:b.configure(bg=BG))
             if symbol == '□': self.max_button = button
-        root.bind('<Map>', self.on_map, add='+')
-        root.bind('<Configure>', self.on_state, add='+')
+        # A toplevel's ordinary bind tag is also present on every descendant.
+        # Use a root-only tag so scrolling child windows does not enter Python
+        # title-bar callbacks for their Map/Configure events.
+        self._event_tag = f'SkyLyricsTitleBar{id(self)}'
+        root.bindtags((self._event_tag,) + root.bindtags())
+        root.bind_class(self._event_tag, '<Map>', self.on_map)
+        root.bind_class(self._event_tag, '<Configure>', self.on_state)
         root.after_idle(self.apply_frame)
 
     def hwnd(self):
@@ -61,6 +67,10 @@ class TitleBar(tk.Frame):
 
     def on_state(self, event):
         if event.widget is self.root:
+            size = (event.width, event.height)
+            if self.last_size == size:
+                return
+            self.last_size = size
             state = self.root.state()
             if state != self.last_state:
                 self.last_state = state
@@ -82,6 +92,7 @@ class SlimScroll(tk.Canvas):
         super().__init__(parent, width=10, highlightthickness=0, bg='white', cursor='arrow')
         self.target, self.first, self.last = target, 0.0, 1.0
         self.drag_offset = 0
+        self._thumb_geometry = self._thumb_state = None
         self.thumb = self.create_line(5, 5, 5, 5, fill='#b7dbf2', width=4, capstyle='round')
         self.bind('<Configure>', lambda e:self.paint())
         self.bind('<Enter>', lambda e:self.itemconfigure(self.thumb, fill=BLUE))
@@ -90,7 +101,10 @@ class SlimScroll(tk.Canvas):
         self.bind('<B1-Motion>', self.move)
 
     def set(self, first, last):
-        self.first, self.last = float(first), float(last)
+        first, last = float(first), float(last)
+        if (self.first, self.last) == (first, last):
+            return
+        self.first, self.last = first, last
         self.paint()
 
     def geometry(self):
@@ -102,8 +116,14 @@ class SlimScroll(tk.Canvas):
 
     def paint(self):
         top, size, _ = self.geometry()
-        self.itemconfigure(self.thumb, state='hidden' if self.last-self.first >= .999 else 'normal')
-        self.coords(self.thumb, 5, top+2, 5, top+size-2)
+        state = 'hidden' if self.last-self.first >= .999 else 'normal'
+        if state != self._thumb_state:
+            self._thumb_state = state
+            self.itemconfigure(self.thumb, state=state)
+        geometry = (5, top+2, 5, top+size-2)
+        if self._thumb_geometry != geometry:
+            self._thumb_geometry = geometry
+            self.coords(self.thumb, *geometry)
 
     def press(self, event):
         top, size, _ = self.geometry()

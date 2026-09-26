@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta, timezone
 from lyrics import LocalLyrics
-from idle_display import IdleClock, settings_from, display_pages
+from idle_display import IdleClock, settings_from, display_pages, idle_needs_stats
 from system_stats import SystemStats
 
 from winrt.windows.media import (
@@ -27,6 +27,17 @@ from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessio
 APP_ID = 'K1001.MediaBridge'
 DATA_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'K1001Bridge'
 ZERO = timedelta(0)
+
+
+def other_player_playing(sessions, excluded=''):
+    for session in sessions:
+        try:
+            if session.source_app_user_model_id != excluded and int(session.get_playback_info().playback_status) == 4:
+                return True
+        except Exception:
+            # A different app can close between the session list and this query.
+            continue
+    return False
 
 
 def position_now(timeline, playing, rate):
@@ -50,6 +61,8 @@ class Bridge:
         self.source = None
         self.source_id = ''
         self.last_metadata = None
+        self.output_disabled = False
+        self.last_events = {}
         self.last_choices = None
         self.last_session_reclaim = 0.0
         self.closing = False
@@ -64,6 +77,10 @@ class Bridge:
         self.stats = SystemStats()
 
     def emit(self, kind, value):
+        if kind in ('status', 'track', 'output', 'choices'):
+            if kind in self.last_events and self.last_events[kind] == value:
+                return
+            self.last_events[kind] = value
         self.events.put((kind, value))
 
     def start_thread(self):
@@ -83,11 +100,12 @@ class Bridge:
         self.commands.put((action, value))
 
     def disable(self):
-        if self.smtc:
+        if self.smtc and not self.output_disabled:
             self.smtc.playback_status = MediaPlaybackStatus.STOPPED
             self.smtc.display_updater.clear_all()
             self.smtc.display_updater.update()
             self.smtc.is_enabled = False
+            self.output_disabled = True
         self.last_metadata = None
         self.source = None
         self.source_id = ''
@@ -115,6 +133,7 @@ class Bridge:
 
     def publish(self, title, artist='', album='', playing=True, timeline=None, rate=None):
         c = self.smtc
+        self.output_disabled = False
         c.is_enabled = True
         # Keep the session usable even when a source omits capability flags.
         c.is_play_enabled = True
@@ -129,7 +148,7 @@ class Bridge:
             updater.update()
             self.last_metadata = metadata
             self.emit('output', title)
-            logging.info('Published metadata update from %s', self.source_id or 'manual')
+            logging.debug('Published metadata update from %s', self.source_id or 'manual')
         c.playback_status = MediaPlaybackStatus.PLAYING if playing else MediaPlaybackStatus.PAUSED
         props = SystemMediaTransportControlsTimelineProperties()
         if timeline and timeline.end_time > timeline.start_time:
@@ -144,7 +163,7 @@ class Bridge:
         return props.position, props.end_time
 
     async def show_idle(self, now):
-        self.stats.set_active('idle', True)
+        self.stats.set_active('idle', idle_needs_stats(self.settings))
         if self.idle_started is None:
             self.idle_started = now
             self.smtc.is_enabled = False
@@ -181,7 +200,7 @@ class Bridge:
         if not candidates:
             self.source = None
             self.source_id = ''
-            other_playing = any(int(s.get_playback_info().playback_status) == 4 for s in sessions)
+            other_playing = other_player_playing(sessions)
             active = self.idle_clock.active(other_playing, now, self.settings['idle_enabled'], self.settings['idle_minutes'])
             self.update_sampling(now, other_playing)
             if not other_playing and (active or now < self.preview_until):
@@ -211,8 +230,7 @@ class Bridge:
         self.smtc.is_stop_enabled = controls.is_stop_enabled
         timeline = s.get_timeline_properties()
         playing = int(info.playback_status) == 4
-        other_playing = any(s.source_app_user_model_id != self.source_id and
-                            int(s.get_playback_info().playback_status) == 4 for s in sessions)
+        other_playing = other_player_playing(sessions, self.source_id)
         active = self.idle_clock.active(playing or other_playing, now,
                                        self.settings['idle_enabled'], self.settings['idle_minutes'])
         self.update_sampling(now, playing or other_playing)
@@ -248,7 +266,8 @@ class Bridge:
     def update_sampling(self, now, playing):
         almost_idle = (not playing and self.settings['idle_enabled'] and self.idle_clock.since is not None
                        and now-self.idle_clock.since >= max(0, self.settings['idle_minutes']*60-10))
-        self.stats.set_active('idle', almost_idle or now < self.preview_until)
+        self.stats.set_active('idle', idle_needs_stats(self.settings) and
+                              (almost_idle or now < self.preview_until))
 
     async def main(self):
         self.loop = asyncio.get_running_loop()
@@ -309,14 +328,20 @@ class Bridge:
                     await self.poll()
                 except Exception:
                     logging.exception('Bridge iteration failed')
-                    self.disable()
+                    try:
+                        self.disable()
+                    except Exception:
+                        logging.exception('Could not clear media output')
                     self.emit('status', '读取暂时失败，正在重试…')
                 await asyncio.sleep(0.2)
         finally:
-            self.stats.close()
-            self.disable()
-            self.smtc.remove_button_pressed(token)
-            player.close()
+            for name, cleanup in [('sensors', self.stats.close), ('media output', self.disable),
+                                  ('media buttons', lambda: self.smtc.remove_button_pressed(token)),
+                                  ('media player', player.close)]:
+                try:
+                    cleanup()
+                except Exception:
+                    logging.exception('Could not close %s', name)
             await self.lyrics.close()
 
 

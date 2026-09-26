@@ -78,6 +78,14 @@ def values_for(snapshot, now=None):
     return values
 
 
+def idle_needs_stats(settings):
+    """Clock/date/literal pages do not need a running hardware sampler."""
+    if settings['idle_mode'] == 'system':
+        return True
+    return any(field in TOKENS - {'time', 'date'}
+               for _, field, _, _ in Formatter().parse(settings['custom_text']))
+
+
 def display_pages(settings, snapshot, now=None):
     values = values_for(snapshot, now)
     if settings['idle_mode'] == 'custom':

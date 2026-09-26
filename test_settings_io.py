@@ -41,9 +41,10 @@ class SettingsIOTests(unittest.TestCase):
                 self.assertFalse(self.app.apply_settings(settings_from({}), True))
             finally:
                 release.set()
-            kind, (saved, preview) = self.app.events.get(timeout=2)
+            kind, (saved, preview, startup) = self.app.events.get(timeout=2)
             self.assertEqual(kind, 'settings_saved')
             self.assertTrue(preview)
+            self.assertTrue(startup)
             self.assertTrue(self.app.config.exists())
 
     def test_unchanged_startup_does_not_launch_powershell(self):

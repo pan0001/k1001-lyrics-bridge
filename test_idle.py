@@ -1,9 +1,16 @@
 import unittest
 from datetime import datetime
-from idle_display import IdleClock, settings_from, display_pages, validate_template
+from idle_display import IdleClock, settings_from, display_pages, validate_template, idle_needs_stats
 
 
 class IdleTests(unittest.TestCase):
+    def test_only_hardware_tokens_require_sampling(self):
+        for text in ('休息一下', '{time} {date}', '{{cpu}}'):
+            self.assertFalse(idle_needs_stats(settings_from({'idle_mode':'custom','custom_text':text})))
+        for text in ('{cpu}', '{memory}', '{gpu_temp}', '{cpu_ghz}'):
+            self.assertTrue(idle_needs_stats(settings_from({'idle_mode':'custom','custom_text':text})))
+        self.assertTrue(idle_needs_stats(settings_from({})))
+
     def test_pause_boundary_resume_and_second_pause(self):
         clock = IdleClock()
         self.assertFalse(clock.active(True, 100, True, 5))
